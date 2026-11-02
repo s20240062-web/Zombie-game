@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>ZOMBIE FPS</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#000;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;font-family:-apple-system,sans-serif;color:#fff}
+canvas{display:block}
+.abs{position:absolute;pointer-events:none}
+#cross{left:50%;top:50%;width:14px;height:14px;margin:-7px 0 0 -7px;border:2px solid rgba(255,255,255,.7);border-radius:50%}
+#hud{left:3vmin;top:3vmin;font-size:3.2vmin;font-weight:bold;text-shadow:0 0 4px #000;line-height:1.5}
+#hpb{width:30vmin;height:2.6vmin;background:rgba(0,0,0,.5);border:2px solid #fff}
+#hp{height:100%;width:100%;background:#d22}
+#info{right:3vmin;top:3vmin;font-size:3.2vmin;font-weight:bold;text-align:right;text-shadow:0 0 4px #000;line-height:1.5}
+#dmg{inset:0;background:radial-gradient(transparent 40%,rgba(200,0,0,.8));opacity:0}
+#banner{left:0;right:0;top:25%;text-align:center;font-size:8vmin;font-weight:bold;color:#e33;text-shadow:0 0 10px #000;opacity:0;transition:opacity .5s}
+.btn{position:absolute;border-radius:50%;background:rgba(255,255,255,.18);border:2px solid rgba(255,255,255,.5);display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:3vmin}
+#fire{right:6vmin;bottom:8vmin;width:22vmin;height:22vmin;background:rgba(220,40,40,.35)}
+#reload{right:31vmin;bottom:6vmin;width:14vmin;height:14vmin}
+#jb{width:100px;height:100px;margin:-50px 0 0 -50px;border-radius:50%;border:2px solid rgba(255,255,255,.4);display:none}
+#jk{width:44px;height:44px;margin:-22px 0 0 -22px;border-radius:50%;background:rgba(255,255,255,.4);display:none}
+#msg{position:absolute;inset:0;background:rgba(0,0,0,.75);display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;font-size:5vmin;z-index:9}
+#msg small{font-size:2.8vmin;opacity:.8;margin-top:2vmin;line-height:1.6}
+</style>
+</head>
+<body>
+<div id="cross" class="abs"></div>
+<div id="dmg" class="abs"></div>
+<div id="hud" class="abs"><div id="hpb"><div id="hp"></div></div><div id="ammo"></div></div>
+<div id="info" class="abs"></div>
+<div id="banner" class="abs"></div>
+<div id="jb" class="abs"></div><div id="jk" class="abs"></div>
+<div id="fire" class="btn">FIRE</div>
+<div id="reload" class="btn">RELOAD</div>
+<div id="msg">読み込み中...</div>
+
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {ColladaLoader} from 'three/addons/loaders/ColladaLoader.js';
+import {clone as skClone} from 'three/addons/utils/SkeletonUtils.js';
+
+/* ===== 設定（見た目がおかしい時はここを調整） ===== */
+const GUN_FILE='Gun.dae', ZOMBIE_FILE='zombie_character_animated.glb';
+const GUN_LEN=0.5;            // 銃の表示長さ
+const GUN_YAW=0;              // 銃の向きがおかしい時: Math.PI や Math.PI/2 に
+const GUN_POS=[0.2,-0.2,-0.45];
+const ZOMBIE_H=1.8;           // ゾンビの身長
+const ZOMBIE_YAW=0;           // ゾンビが後ろ向きなら Math.PI に
+const ATK_HIT=1.98/1.5, ATK_END=3.0/1.5; // slash(6.6秒)の30%地点で命中、1.5倍速
+const MAG=12, ARENA=29, MAX_ALIVE=12;
+
+const $=id=>document.getElementById(id);
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+/* ===== シーン ===== */
+const renderer=new THREE.WebGLRenderer({antialias:false});
+renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));
+renderer.setSize(innerWidth,innerHeight);
+document.body.prepend(renderer.domElement);
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x05070d);
+scene.fog=new THREE.Fog(0x05070d,6,38);
+const cam=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,0.05,80);
+cam.rotation.order='YXZ'; scene.add(cam);
+addEventListener('resize',()=>{renderer.setSize(innerWidth,innerHeight);cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();});
+scene.add(new THREE.AmbientLight(0x6670aa,0.9));
+const moon=new THREE.DirectionalLight(0x8899ff,0.5); moon.position.set(5,10,3); scene.add(moon);
+const torch=new THREE.SpotLight(0xfff0d0,90,35,0.55,0.6,1.5);
+cam.add(torch); cam.add(torch.target); torch.target.position.set(0,0,-1);
+const flash=new THREE.PointLight(0xffaa44,0,8); flash.position.set(0.2,-0.1,-0.9); cam.add(flash);
+
+// 地面
+const c=document.createElement('canvas'); c.width=c.height=128;
+const g=c.getContext('2d'); g.fillStyle='#2a2d2a'; g.fillRect(0,0,128,128);
+g.strokeStyle='#1c1e1c'; g.lineWidth=3; g.strokeRect(0,0,128,128);
+for(let i=0;i<300;i++){g.fillStyle=`rgba(${Math.random()*60|0},${Math.random()*60|0},${Math.random()*60|0},.25)`;g.fillRect(Math.random()*128,Math.random()*128,3,3);}
+const gt=new THREE.CanvasTexture(c); gt.wrapS=gt.wrapT=THREE.RepeatWrapping; gt.repeat.set(30,30); gt.colorSpace=THREE.SRGBColorSpace;
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(62,62),new THREE.MeshLambertMaterial({map:gt}));
+ground.rotation.x=-Math.PI/2; scene.add(ground);
+const wallM=new THREE.MeshLambertMaterial({color:0x3a3f45});
+for(const [x,z,w,d] of [[0,-31,62,1],[0,31,62,1],[-31,0,1,62],[31,0,1,62]]){
+  const m=new THREE.Mesh(new THREE.BoxGeometry(w,4,d),wallM); m.position.set(x,2,z); scene.add(m);
+}
+const obs=[]; const crateM=new THREE.MeshLambertMaterial({color:0x5a4630});
+for(let i=0;i<16;i++){
+  const s=1.5+Math.random()*1.8; let x,z;
+  do{x=(Math.random()*2-1)*25;z=(Math.random()*2-1)*25;}while(Math.hypot(x,z)<7);
+  const m=new THREE.Mesh(new THREE.BoxGeometry(s,s*(0.8+Math.random()),s),crateM);
+  m.geometry.computeBoundingBox(); m.position.set(x,m.geometry.boundingBox.max.y,z); scene.add(m);
+  obs.push({x,z,h:s/2});
+}
+function resolve(p,r){
+  p.x=clamp(p.x,-ARENA+r,ARENA-r); p.z=clamp(p.z,-ARENA+r,ARENA-r);
+  for(const o of obs){
+    const cx=clamp(p.x,o.x-o.h,o.x+o.h), cz=clamp(p.z,o.z-o.h,o.z+o.h);
+    const dx=p.x-cx, dz=p.z-cz, d2=dx*dx+dz*dz;
+    if(d2<r*r){ if(d2>1e-6){const d=Math.sqrt(d2);p.x+=dx/d*(r-d);p.z+=dz/d*(r-d);} else p.x+=r; }
+  }
+}
+
+/* ===== 音（合成） ===== */
+let ac;
+function audio(){ac=ac||new (window.AudioContext||window.webkitAudioContext)(); if(ac.state!=='running')ac.resume();}
+function noise(dur,vol,fq){
+  if(!ac)return; const n=ac.sampleRate*dur|0, b=ac.createBuffer(1,n,ac.sampleRate), d=b.getChannelData(0);
+  for(let i=0;i<n;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/n,2);
+  const s=ac.createBufferSource(); s.buffer=b; const f=ac.createBiquadFilter(); f.type='lowpass'; f.frequency.value=fq;
+  const gn=ac.createGain(); gn.gain.value=vol; s.connect(f); f.connect(gn); gn.connect(ac.destination); s.start();
+}
+function tone(type,f0,f1,dur,vol){
+  if(!ac)return; const t=ac.currentTime, o=ac.createOscillator(), gn=ac.createGain();
+  o.type=type; o.frequency.setValueAtTime(f0,t); o.frequency.exponentialRampToValueAtTime(f1,t+dur);
+  gn.gain.setValueAtTime(vol,t); gn.gain.exponentialRampToValueAtTime(0.001,t+dur);
+  o.connect(gn); gn.connect(ac.destination); o.start(t); o.stop(t+dur);
+}
+const sfx={
+  shot(){noise(.25,.9,3500);tone('square',180,40,.15,.35);},
+  groan(){tone('sawtooth',80+Math.random()*40,45,.9,.12);},
+  hurt(){tone('sawtooth',220,70,.3,.4);},
+  reload(){tone('square',900,500,.05,.15);setTimeout(()=>tone('square',500,900,.05,.15),900);},
+  hit(){tone('triangle',300,100,.1,.3);}
+};
+
+/* ===== 状態 ===== */
+const p={x:0,z:0,hp:100,yaw:0,pitch:0};
+let playing=false, loaded=false, ammo=MAG, cd=0, reloading=false, rt=0, recoil=0, flashT=0, dmgA=0, bob=0;
+let wave=0, toSpawn=0, spawnT=0, nextWaveT=0, score=0, firing=false;
+const zombies=[];
+let gun, zProto, zClips, tPrev=performance.now();
+
+function hud(){
+  $('hp').style.width=Math.max(0,p.hp)+'%';
+  $('ammo').textContent=reloading?'RELOADING...':`AMMO ${ammo} / ∞`;
+  $('info').innerHTML=`WAVE ${wave}<br>SCORE ${score}<br>残り ${toSpawn+zombies.filter(z=>z.state!=='dead').length}`;
+}
+function banner(t){const b=$('banner');b.textContent=t;b.style.opacity=1;setTimeout(()=>b.style.opacity=0,2000);}
+
+/* ===== アセット読み込み ===== */
+const dm=new THREE.LoadingManager();
+dm.setURLModifier(u=>/\.(png|jpe?g|tga|bmp|gif)(\?.*)?$/i.test(u)?decodeURIComponent(u.replace(/^.*[\\\/]/,'')):u);
+function load(L,f){return new Promise((res,rej)=>L.load(f,res,undefined,()=>rej(new Error(f+' を読み込めません'))));}
+Promise.all([load(new ColladaLoader(dm),GUN_FILE),load(new GLTFLoader(),ZOMBIE_FILE)]).then(([dae,glb])=>{
+  // 銃
+  const m=dae.scene; m.updateMatrixWorld(true);
+  m.traverse(o=>{if(o.isMesh){o.frustumCulled=false;(Array.isArray(o.material)?o.material:[o.material]).forEach(mt=>{
+    mt.side=THREE.DoubleSide; if(mt.opacity===0)mt.opacity=1; mt.transparent=false; if(mt.map)mt.map.colorSpace=THREE.SRGBColorSpace;});}});
+  let box=new THREE.Box3().setFromObject(m), sz=box.getSize(new THREE.Vector3());
+  const inner=new THREE.Group(); inner.add(m);
+  if(sz.x>sz.z)inner.rotation.y=Math.PI/2;
+  inner.rotation.y+=GUN_YAW;
+  const mx=Math.max(sz.x,sz.y,sz.z); m.scale.setScalar(GUN_LEN/mx);
+  m.updateMatrixWorld(true); box=new THREE.Box3().setFromObject(m); const ct=box.getCenter(new THREE.Vector3());
+  m.position.sub(ct); inner.updateMatrixWorld(true);
+  gun=new THREE.Group(); gun.add(inner); gun.position.set(...GUN_POS); cam.add(gun);
+  // ゾンビ
+  zProto=glb.scene; zClips=glb.animations;
+  zProto.updateMatrixWorld(true);
+  const zb=new THREE.Box3().setFromObject(zProto);
+  zProto.userData.s=ZOMBIE_H/(zb.max.y-zb.min.y); zProto.userData.y=-zb.min.y*zProto.userData.s;
+  loaded=true; $('msg').innerHTML='ZOMBIE FPS<small>タップで開始<br>左：移動　右：視点　FIRE：発射（長押しで連射）<br>ヘッドショットは1発で倒せます</small>';
+}).catch(e=>{$('msg').innerHTML='読み込みエラー<small>'+e.message+'<br>index.html と同じフォルダに置いてください</small>';console.error(e);});
+
+/* ===== ゾンビ ===== */
+const clip=n=>zClips.find(c=>c.name.toLowerCase().includes(n))||zClips[0];
+function play(z,name,once){
+  const a=z.act[name]; if(z.cur===a)return;
+  a.reset(); a.setLoop(once?THREE.LoopOnce:THREE.LoopRepeat,Infinity); a.clampWhenFinished=true;
+  if(!once)a.time=Math.random()*a.getClip().duration;
+  a.play(); if(z.cur)a.crossFadeFrom(z.cur,0.2,false); z.cur=a;
+}
+function spawn(){
+  const a=Math.random()*6.283,d=20+Math.random()*7;
+  const w=new THREE.Group(); w.position.set(clamp(p.x+Math.cos(a)*d,-28,28),0,clamp(p.z+Math.sin(a)*d,-28,28));
+  const m=skClone(zProto); m.scale.setScalar(zProto.userData.s); m.position.y=zProto.userData.y;
+  m.traverse(o=>{if(o.isMesh)o.frustumCulled=false;});
+  w.add(m); scene.add(w);
+  const mixer=new THREE.AnimationMixer(m);
+  const act={walk:mixer.clipAction(clip('walk')),swagger:mixer.clipAction(clip('swagger')),hit:mixer.clipAction(clip('freaky')),atk:mixer.clipAction(clip('slash'))};
+  act.atk.timeScale=1.5;
+  const z={w,m,mixer,act,cur:null,hp:100,state:'walk',t:0,done:false,
+    loco:Math.random()<0.4?'swagger':'walk',speed:Math.min(1.5+wave*0.12,3.2)*(0.85+Math.random()*0.3),groan:Math.random()*8};
+  play(z,z.loco); zombies.push(z);
+}
+function killZ(z,head){
+  z.state='dead'; z.t=0; score+=head?150:100; sfx.hit();
+}
+function hurtPlayer(n){p.hp-=n; dmgA=1; sfx.hurt(); if(p.hp<=0)gameOver(); hud();}
+
+function updateZombies(dt){
+  for(let i=zombies.length-1;i>=0;i--){
+    const z=zombies[i], pos=z.w.position;
+    const dx=p.x-pos.x, dz=p.z-pos.z, d=Math.hypot(dx,dz);
+    if(z.state==='dead'){
+      z.t+=dt; z.m.rotation.x=-Math.min(z.t/0.5,1)*Math.PI/2;
+      if(z.t>2)pos.y-=dt*0.5;
+      if(z.t>4){scene.remove(z.w);zombies.splice(i,1);hud();}
+      continue;
+    }
+    z.mixer.update(dt);
+    z.w.rotation.y=Math.atan2(dx,dz)+ZOMBIE_YAW;
+    z.groan-=dt; if(z.groan<0){z.groan=5+Math.random()*7; if(d<22)sfx.groan();}
+    if(z.state==='walk'){
+      if(d<1.5){z.state='attack';z.t=0;z.done=false;play(z,'atk',true);}
+      else{const sp=z.speed*(z.loco==='swagger'?0.7:1)*dt; pos.x+=dx/d*sp; pos.z+=dz/d*sp;}
+    }else if(z.state==='attack'){
+      z.t+=dt;
+      if(!z.done&&z.t>=ATK_HIT){z.done=true; if(d<2.0)hurtPlayer(8+wave);}
+      if(z.t>=ATK_END){z.state='walk';play(z,z.loco);}
+    }else if(z.state==='hit'){
+      z.t+=dt; if(z.t>0.6){z.state='walk';play(z,z.loco);}
+    }
+    for(let j=i+1;j<zombies.length;j++){
+      const o=zombies[j]; if(o.state==='dead')continue;
+      const ox=pos.x-o.w.position.x, oz=pos.z-o.w.position.z, od=Math.hypot(ox,oz);
+      if(od<0.8&&od>1e-4){const k=(0.8-od)/2/od; pos.x+=ox*k;pos.z+=oz*k;o.w.position.x-=ox*k;o.w.position.z-=oz*k;}
+    }
+    resolve(pos,0.4);
+  }
+}
+
+/* ===== 射撃 ===== */
+const dir=new THREE.Vector3();
+function raySphere(o,d,c,r){
+  const lx=c.x-o.x,ly=c.y-o.y,lz=c.z-o.z, t=lx*d.x+ly*d.y+lz*d.z; if(t<0)return -1;
+  return (lx*lx+ly*ly+lz*lz-t*t)<=r*r?t:-1;
+}
+const tmp=new THREE.Vector3();
+function fire(){
+  if(!playing||reloading||cd>0)return;
+  if(ammo<=0){reload();return;}
+  ammo--; cd=0.28; recoil=1; flashT=0.05; sfx.shot();
+  cam.getWorldDirection(dir); const o=cam.position;
+  let best=null,bt=1e9,bh=false;
+  for(const z of zombies){
+    if(z.state==='dead')continue; const q=z.w.position;
+    let t=raySphere(o,dir,tmp.set(q.x,1.65,q.z),0.28), h=true;
+    if(t<0){t=raySphere(o,dir,tmp.set(q.x,1.0,q.z),0.5);h=false;}
+    if(t>=0&&t<bt){bt=t;best=z;bh=h;}
+  }
+  if(best){
+    best.hp-=bh?100:34;
+    if(best.hp<=0)killZ(best,bh);
+    else{best.state='hit';best.t=0;play(best,'hit',true);sfx.hit();}
+  }
+  if(ammo===0)reload(); hud();
+}
+function reload(){if(reloading||ammo===MAG||!playing)return; reloading=true; rt=1.6; sfx.reload(); hud();}
+
+/* ===== ゲーム進行 ===== */
+function startWave(){wave++; toSpawn=3+wave*2; p.hp=Math.min(100,p.hp+25); banner('WAVE '+wave); hud();}
+function reset(){
+  for(const z of zombies)scene.remove(z.w); zombies.length=0;
+  Object.assign(p,{x:0,z:0,hp:100,yaw:0,pitch:0}); ammo=MAG; reloading=false; cd=0; score=0; wave=0; nextWaveT=0; toSpawn=0; dmgA=0;
+  startWave();
+}
+function gameOver(){
+  playing=false; firing=false;
+  $('msg').style.display='flex'; $('msg').innerHTML=`GAME OVER<small>WAVE ${wave} ／ SCORE ${score}<br>タップで再開</small>`;
+}
+$('msg').addEventListener('click',()=>{
+  if(!loaded)return; audio(); reset(); $('msg').style.display='none'; playing=true;
+});
+
+/* ===== タッチ操作 ===== */
+const joy={id:null,ox:0,oy:0,x:0,y:0}, look={id:null,x:0,y:0};
+const jb=$('jb'), jk=$('jk');
+document.addEventListener('touchstart',e=>{
+  for(const t of e.changedTouches){
+    if(t.target.closest&&t.target.closest('.btn'))continue;
+    if(t.clientX<innerWidth/2){
+      if(joy.id===null){joy.id=t.identifier;joy.ox=t.clientX;joy.oy=t.clientY;joy.x=joy.y=0;
+        for(const el of [jb,jk]){el.style.display='block';el.style.left=t.clientX+'px';el.style.top=t.clientY+'px';}}
+    }else if(look.id===null){look.id=t.identifier;look.x=t.clientX;look.y=t.clientY;}
+  }
+},{passive:false});
+document.addEventListener('touchmove',e=>{
+  e.preventDefault();
+  for(const t of e.changedTouches){
+    if(t.identifier===joy.id){
+      let dx=(t.clientX-joy.ox)/50, dy=(t.clientY-joy.oy)/50; const l=Math.hypot(dx,dy);
+      if(l>1){dx/=l;dy/=l;} joy.x=dx; joy.y=dy;
+      jk.style.left=joy.ox+dx*50+'px'; jk.style.top=joy.oy+dy*50+'px';
+    }else if(t.identifier===look.id){
+      p.yaw-=(t.clientX-look.x)*0.005; p.pitch=clamp(p.pitch-(t.clientY-look.y)*0.005,-1.2,1.2);
+      look.x=t.clientX; look.y=t.clientY;
+    }
+  }
+},{passive:false});
+function end(e){
+  for(const t of e.changedTouches){
+    if(t.identifier===joy.id){joy.id=null;joy.x=joy.y=0;jb.style.display=jk.style.display='none';}
+    if(t.identifier===look.id)look.id=null;
+  }
+}
+document.addEventListener('touchend',end); document.addEventListener('touchcancel',end);
+document.addEventListener('gesturestart',e=>e.preventDefault());
+$('fire').addEventListener('touchstart',e=>{e.preventDefault();firing=true;},{passive:false});
+$('fire').addEventListener('touchend',()=>firing=false); $('fire').addEventListener('touchcancel',()=>firing=false);
+$('reload').addEventListener('touchstart',e=>{e.preventDefault();reload();},{passive:false});
+
+/* ===== メインループ ===== */
+function loop(now){
+  requestAnimationFrame(loop);
+  const dt=Math.min((now-tPrev)/1000,0.05); tPrev=now;
+  if(playing){
+    // 移動
+    const sp=4.5*dt, s=Math.sin(p.yaw), c=Math.cos(p.yaw);
+    p.x+=(c*joy.x+s*joy.y)*sp; p.z+=(-s*joy.x+c*joy.y)*sp; resolve(p,0.4);
+    bob+=Math.hypot(joy.x,joy.y)*dt*9;
+    cam.position.set(p.x,1.6+Math.sin(bob)*0.03*Math.min(1,Math.hypot(joy.x,joy.y)),p.z);
+    cam.rotation.set(p.pitch,p.yaw,0);
+    // 武器
+    cd-=dt; if(firing)fire();
+    if(reloading){rt-=dt; if(rt<=0){reloading=false;ammo=MAG;hud();}}
+    recoil=Math.max(0,recoil-dt*8);
+    if(flashT>0){flashT-=dt;flash.intensity=flashT>0?25:0;}
+    if(gun){
+      const rp=reloading?Math.sin(Math.PI*(1-rt/1.6)):0;
+      gun.position.set(GUN_POS[0],GUN_POS[1]-rp*0.18+Math.sin(bob*2)*0.004,GUN_POS[2]+recoil*0.07);
+      gun.rotation.set(recoil*0.18-rp*0.7,0,0);
+    }
+    // ゾンビ・ウェーブ
+    updateZombies(dt);
+    const alive=zombies.filter(z=>z.state!=='dead').length;
+    spawnT-=dt;
+    if(toSpawn>0&&alive<MAX_ALIVE&&spawnT<=0){spawn();toSpawn--;spawnT=1.2;hud();}
+    if(toSpawn===0&&alive===0){nextWaveT+=dt; if(nextWaveT>3){nextWaveT=0;startWave();}} else nextWaveT=0;
+    dmgA=Math.max(0,dmgA-dt*1.5); $('dmg').style.opacity=dmgA;
+  }
+  renderer.render(scene,cam);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
