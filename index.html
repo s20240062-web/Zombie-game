@@ -48,11 +48,11 @@ import {clone as skClone} from 'three/addons/utils/SkeletonUtils.js';
 /* ===== 設定（見た目がおかしい時はここを調整） ===== */
 const GUN_FILE='Gun.dae', ZOMBIE_FILE='zombie_character_animated.glb';
 const GUN_LEN=0.5;            // 銃の表示長さ
-const GUN_YAW=0;              // 銃の向きがおかしい時: Math.PI や Math.PI/2 に
+const GUN_YAW=Math.PI;        // 銃の向き。逆なら 0 に、横なら Math.PI/2 に
 const GUN_POS=[0.2,-0.2,-0.45];
 const ZOMBIE_H=1.8;           // ゾンビの身長
-const ZOMBIE_YAW=0;           // ゾンビが後ろ向きなら Math.PI に
-const ATK_HIT=1.98/1.5, ATK_END=3.0/1.5; // slash(6.6秒)の30%地点で命中、1.5倍速
+const ZOMBIE_YAW=Math.PI;     // ゾンビの向き。後ろ向きなら 0 に
+const ATK_HIT=0.4, ATK_END=1.1; // 攻撃の発生と終了(秒)。slashは3倍速で再生
 const MAG=12, ARENA=29, MAX_ALIVE=12;
 
 const $=id=>document.getElementById(id);
@@ -64,14 +64,14 @@ renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));
 renderer.setSize(innerWidth,innerHeight);
 document.body.prepend(renderer.domElement);
 const scene=new THREE.Scene();
-scene.background=new THREE.Color(0x05070d);
-scene.fog=new THREE.Fog(0x05070d,6,38);
+scene.background=new THREE.Color(0x0e1424);
+scene.fog=new THREE.Fog(0x0e1424,10,55);
 const cam=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,0.05,80);
 cam.rotation.order='YXZ'; scene.add(cam);
 addEventListener('resize',()=>{renderer.setSize(innerWidth,innerHeight);cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();});
-scene.add(new THREE.AmbientLight(0x6670aa,0.9));
-const moon=new THREE.DirectionalLight(0x8899ff,0.5); moon.position.set(5,10,3); scene.add(moon);
-const torch=new THREE.SpotLight(0xfff0d0,90,35,0.55,0.6,1.5);
+scene.add(new THREE.AmbientLight(0x8890c8,2.2));
+const moon=new THREE.DirectionalLight(0xaabbff,1.4); moon.position.set(5,10,3); scene.add(moon);
+const torch=new THREE.SpotLight(0xfff0d0,180,40,0.6,0.6,1.5);
 cam.add(torch); cam.add(torch.target); torch.target.position.set(0,0,-1);
 const flash=new THREE.PointLight(0xffaa44,0,8); flash.position.set(0.2,-0.1,-0.9); cam.add(flash);
 
@@ -160,11 +160,45 @@ Promise.all([load(new ColladaLoader(dm),GUN_FILE),load(new GLTFLoader(),ZOMBIE_F
   gun=new THREE.Group(); gun.add(inner); gun.position.set(...GUN_POS); cam.add(gun);
   // ゾンビ
   zProto=glb.scene; zClips=glb.animations;
+  zClips.forEach(c=>{c.tracks=c.tracks.filter(t=>!(/\.position$/.test(t.name)&&(/^(root|armature|scene|rig)/i.test(t.name)||glb.scene.children.some(ch=>t.name.startsWith(ch.name+'.')))));});
   zProto.updateMatrixWorld(true);
   const zb=new THREE.Box3().setFromObject(zProto);
   zProto.userData.s=ZOMBIE_H/(zb.max.y-zb.min.y); zProto.userData.y=-zb.min.y*zProto.userData.s;
-  loaded=true; $('msg').innerHTML='ZOMBIE FPS<small>タップで開始<br>左：移動　右：視点　FIRE：発射（長押しで連射）<br>ヘッドショットは1発で倒せます</small>';
+  loaded=true; $('msg').innerHTML='ZOMBIE FPS<small>タップで開始<br>左：移動　右：視点　FIRE：発射（1タップ1発）<br>ヘッドショットは1発で倒せます</small>';
 }).catch(e=>{$('msg').innerHTML='読み込みエラー<small>'+e.message+'<br>index.html と同じフォルダに置いてください</small>';console.error(e);});
+
+/* ===== 血・肉片 ===== */
+const bloodM=[0xaa0000,0x550000,0x8a2a2a,0xcc1111].map(c=>new THREE.MeshBasicMaterial({color:c}));
+const bGeo=new THREE.BoxGeometry(1,1,1), decalG=new THREE.CircleGeometry(1,10);
+const parts=[], decals=[];
+function burst(x,y,z,n,spd,big){
+  for(let i=0;i<n;i++){
+    const m=new THREE.Mesh(bGeo,bloodM[Math.random()*4|0]);
+    const s=big&&Math.random()<0.25?0.1+Math.random()*0.12:0.03+Math.random()*0.05;
+    m.scale.set(s,s,s); m.position.set(x,y,z);
+    const a=Math.random()*6.283,u=Math.random()*spd;
+    scene.add(m); parts.push({m,s,vx:Math.cos(a)*u,vy:Math.random()*spd*1.2,vz:Math.sin(a)*u,rest:false,life:6});
+    if(parts.length>260){const o=parts.shift();scene.remove(o.m);}
+  }
+}
+function splat(x,z,r){
+  const m=new THREE.Mesh(decalG,new THREE.MeshBasicMaterial({color:Math.random()<.5?0x7a0000:0x3a0000,transparent:true,opacity:.85,depthWrite:false}));
+  m.rotation.x=-Math.PI/2; m.position.set(x,0.012+(decals.length%40)*0.0005,z); m.scale.setScalar(r); scene.add(m);
+  decals.push(m); if(decals.length>90){const o=decals.shift();scene.remove(o);o.material.dispose();}
+  return m;
+}
+function updateParts(dt){
+  for(let i=parts.length-1;i>=0;i--){
+    const q=parts[i],m=q.m;
+    if(!q.rest){
+      q.vy-=14*dt; m.position.x+=q.vx*dt; m.position.y+=q.vy*dt; m.position.z+=q.vz*dt;
+      if(m.position.y<=0.03){
+        m.position.y=0.03; splat(m.position.x,m.position.z,q.s*4+0.08+Math.random()*0.1);
+        if(q.s>0.09){q.rest=true;m.scale.y=q.s*0.6;}else{scene.remove(m);parts.splice(i,1);}
+      }
+    }else{q.life-=dt; if(q.life<0){scene.remove(m);parts.splice(i,1);}}
+  }
+}
 
 /* ===== ゾンビ ===== */
 const clip=n=>zClips.find(c=>c.name.toLowerCase().includes(n))||zClips[0];
@@ -182,13 +216,20 @@ function spawn(){
   w.add(m); scene.add(w);
   const mixer=new THREE.AnimationMixer(m);
   const act={walk:mixer.clipAction(clip('walk')),swagger:mixer.clipAction(clip('swagger')),hit:mixer.clipAction(clip('freaky')),atk:mixer.clipAction(clip('slash'))};
-  act.atk.timeScale=1.5;
-  const z={w,m,mixer,act,cur:null,hp:100,state:'walk',t:0,done:false,
+  act.atk.timeScale=3;
+  let head=null; m.traverse(o=>{if(o.isBone&&!head&&/head/i.test(o.name)&&!/top|end/i.test(o.name))head=o;});
+  const z={w,m,mixer,act,head,cur:null,hp:100,state:'walk',t:0,done:false,
     loco:Math.random()<0.4?'swagger':'walk',speed:Math.min(1.5+wave*0.12,3.2)*(0.85+Math.random()*0.3),groan:Math.random()*8};
   play(z,z.loco); zombies.push(z);
 }
 function killZ(z,head){
-  z.state='dead'; z.t=0; score+=head?150:100; sfx.hit();
+  z.state='dead'; z.t=0; z.head_=head; score+=head?150:100; sfx.hit(); sfx.hurt();
+  z.tilt=(Math.random()<.5?-1:1)*(0.2+Math.random()*0.6);
+  const q=z.w.position;
+  if(head){ if(z.head)z.head.scale.setScalar(0.001); burst(q.x,1.65,q.z,70,5,true); }
+  else burst(q.x,1.2,q.z,60,5,true);
+  burst(q.x,0.8,q.z,25,3,true);
+  z.pool=splat(q.x,q.z,0.2); z.pool.userData.pool=true;
 }
 function hurtPlayer(n){p.hp-=n; dmgA=1; sfx.hurt(); if(p.hp<=0)gameOver(); hud();}
 
@@ -197,20 +238,23 @@ function updateZombies(dt){
     const z=zombies[i], pos=z.w.position;
     const dx=p.x-pos.x, dz=p.z-pos.z, d=Math.hypot(dx,dz);
     if(z.state==='dead'){
-      z.t+=dt; z.m.rotation.x=-Math.min(z.t/0.5,1)*Math.PI/2;
-      if(z.t>2)pos.y-=dt*0.5;
-      if(z.t>4){scene.remove(z.w);zombies.splice(i,1);hud();}
+      z.t+=dt; const f=Math.min(z.t/0.5,1);
+      z.m.rotation.x=-f*Math.PI/2; z.m.rotation.z=z.tilt*f;
+      if(z.pool&&z.t<4)z.pool.scale.setScalar(0.2+Math.min(z.t/4,1)*1.3);
+      if(z.head_&&z.t<1.5&&Math.random()<0.8)burst(pos.x,1.6-1.4*f,pos.z,4,2.2,false);
+      if(z.t>8)pos.y-=dt*0.5;
+      if(z.t>11){scene.remove(z.w);zombies.splice(i,1);hud();}
       continue;
     }
     z.mixer.update(dt);
     z.w.rotation.y=Math.atan2(dx,dz)+ZOMBIE_YAW;
     z.groan-=dt; if(z.groan<0){z.groan=5+Math.random()*7; if(d<22)sfx.groan();}
     if(z.state==='walk'){
-      if(d<1.5){z.state='attack';z.t=0;z.done=false;play(z,'atk',true);}
+      if(d<1.8){z.state='attack';z.t=0;z.done=false;play(z,'atk',true);}
       else{const sp=z.speed*(z.loco==='swagger'?0.7:1)*dt; pos.x+=dx/d*sp; pos.z+=dz/d*sp;}
     }else if(z.state==='attack'){
       z.t+=dt;
-      if(!z.done&&z.t>=ATK_HIT){z.done=true; if(d<2.0)hurtPlayer(8+wave);}
+      if(!z.done&&z.t>=ATK_HIT){z.done=true; if(d<2.4)hurtPlayer(8+wave);}
       if(z.t>=ATK_END){z.state='walk';play(z,z.loco);}
     }else if(z.state==='hit'){
       z.t+=dt; if(z.t>0.6){z.state='walk';play(z,z.loco);}
@@ -244,6 +288,7 @@ function fire(){
     if(t>=0&&t<bt){bt=t;best=z;bh=h;}
   }
   if(best){
+    const bq=best.w.position; burst(bq.x,bh?1.65:1.1,bq.z,bh?30:16,3.5,false);
     best.hp-=bh?100:34;
     if(best.hp<=0)killZ(best,bh);
     else{best.state='hit';best.t=0;play(best,'hit',true);sfx.hit();}
@@ -256,6 +301,7 @@ function reload(){if(reloading||ammo===MAG||!playing)return; reloading=true; rt=
 function startWave(){wave++; toSpawn=3+wave*2; p.hp=Math.min(100,p.hp+25); banner('WAVE '+wave); hud();}
 function reset(){
   for(const z of zombies)scene.remove(z.w); zombies.length=0;
+  for(const q of parts)scene.remove(q.m); parts.length=0; for(const d of decals)scene.remove(d); decals.length=0;
   Object.assign(p,{x:0,z:0,hp:100,yaw:0,pitch:0}); ammo=MAG; reloading=false; cd=0; score=0; wave=0; nextWaveT=0; toSpawn=0; dmgA=0;
   startWave();
 }
@@ -300,7 +346,7 @@ function end(e){
 }
 document.addEventListener('touchend',end); document.addEventListener('touchcancel',end);
 document.addEventListener('gesturestart',e=>e.preventDefault());
-$('fire').addEventListener('touchstart',e=>{e.preventDefault();firing=true;},{passive:false});
+$('fire').addEventListener('touchstart',e=>{e.preventDefault();fire();},{passive:false});
 $('fire').addEventListener('touchend',()=>firing=false); $('fire').addEventListener('touchcancel',()=>firing=false);
 $('reload').addEventListener('touchstart',e=>{e.preventDefault();reload();},{passive:false});
 
@@ -316,7 +362,7 @@ function loop(now){
     cam.position.set(p.x,1.6+Math.sin(bob)*0.03*Math.min(1,Math.hypot(joy.x,joy.y)),p.z);
     cam.rotation.set(p.pitch,p.yaw,0);
     // 武器
-    cd-=dt; if(firing)fire();
+    cd-=dt;
     if(reloading){rt-=dt; if(rt<=0){reloading=false;ammo=MAG;hud();}}
     recoil=Math.max(0,recoil-dt*8);
     if(flashT>0){flashT-=dt;flash.intensity=flashT>0?25:0;}
@@ -326,7 +372,7 @@ function loop(now){
       gun.rotation.set(recoil*0.18-rp*0.7,0,0);
     }
     // ゾンビ・ウェーブ
-    updateZombies(dt);
+    updateZombies(dt); updateParts(dt);
     const alive=zombies.filter(z=>z.state!=='dead').length;
     spawnT-=dt;
     if(toSpawn>0&&alive<MAX_ALIVE&&spawnT<=0){spawn();toSpawn--;spawnT=1.2;hud();}
